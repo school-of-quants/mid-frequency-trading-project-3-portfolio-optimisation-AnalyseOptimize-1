@@ -5,3 +5,25 @@ backtest_end_date: "2025-12-31"
 
 init_cash: 20000000
 fees: 0.001
+
+data:
+  min_ticker_coverage: 0.9
+  coverage_field: "Close"
+
+labeling:
+  pt_sl: [1, 1]
+  vertical_barrier_days: 10
+  target_return: 0.05
+
+model:
+  iterations: 1000
+  learning_rate: 0.05
+  depth: 6
+  random_seed: 42
+  cv_splits: 5
+  embargo_days: 10
+  verbose: false
+
+backtest:
+  cv_splits: 6
+  cv_test_splits: 2

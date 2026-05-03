@@ -66,7 +66,14 @@ def applyPtSlOnT1(close, events, ptSl):
     return out
 
 
-def three_barrier(close, ptSl=[1, 1], rolling_n=50, scaling_factor=2.0):
+def three_barrier(
+    close,
+    ptSl=None,
+    rolling_n=50,
+    scaling_factor=2.0,
+    vertical_barrier_days=10,
+    target_return=0.05,
+):
     """Labeling based on tripple barrier method and historical volatility
 
     Args:
@@ -78,10 +85,13 @@ def three_barrier(close, ptSl=[1, 1], rolling_n=50, scaling_factor=2.0):
     Returns:
         pd.Series: 3-class labels
     """
+    if ptSl is None:
+        ptSl = [1, 1]
+
     events = pd.DataFrame(
         {
-            "t1": close.index + dt.timedelta(days=10),
-            "trgt": 0.05,
+            "t1": close.index + dt.timedelta(days=vertical_barrier_days),
+            "trgt": target_return,
         },
         index=close.index,
     )
