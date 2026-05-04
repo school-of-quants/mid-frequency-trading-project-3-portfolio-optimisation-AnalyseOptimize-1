@@ -86,20 +86,33 @@ def _cross_validate_ticker(X_ticker, y_ticker, model_cfg):
     best_iterations = []
 
     for fold, (train_idx, val_idx) in enumerate(splitter.split(X_ticker), start=1):
+        y_fold_train = y_ticker.iloc[train_idx]
+        y_fold_val = y_ticker.iloc[val_idx]
+        if y_fold_train.nunique() < 2:
+            logger.info("Skipping CV fold %d: only one target class in train", fold)
+            continue
+
+        missing_val_classes = set(y_fold_val.unique()) - set(y_fold_train.unique())
+        if missing_val_classes:
+            logger.info(
+                "Skipping CV fold %d: validation has classes absent in train: %s",
+                fold,
+                sorted(missing_val_classes),
+            )
+            continue
+
         model = instantiate_model(model_cfg, use_best_model=True)
         model.fit(
             X=X_ticker.iloc[train_idx],
-            y=y_ticker.iloc[train_idx],
-            eval_set=(X_ticker.iloc[val_idx], y_ticker.iloc[val_idx]),
+            y=y_fold_train,
+            eval_set=(X_ticker.iloc[val_idx], y_fold_val),
         )
         y_pred = model.predict(X_ticker.iloc[val_idx]).reshape(-1).astype(int)
         fold_metrics.append(
             {
                 "fold": fold,
-                "accuracy": accuracy_score(y_ticker.iloc[val_idx], y_pred),
-                "balanced_accuracy": balanced_accuracy_score(
-                    y_ticker.iloc[val_idx], y_pred
-                ),
+                "accuracy": accuracy_score(y_fold_val, y_pred),
+                "balanced_accuracy": balanced_accuracy_score(y_fold_val, y_pred),
                 "train_size": len(train_idx),
                 "val_size": len(val_idx),
                 "best_iteration": model.get_best_iteration(),
@@ -111,6 +124,78 @@ def _cross_validate_ticker(X_ticker, y_ticker, model_cfg):
     return fold_metrics, best_iterations
 
 
+def _fit_model_with_cv(X_ticker, y_ticker, model_cfg, ticker, model_name):
+    if y_ticker.nunique() < 2:
+        logger.info("Skipping %s %s: only one target class", ticker, model_name)
+        return None, [], []
+
+    fold_metrics, best_iterations = _cross_validate_ticker(
+        X_ticker, y_ticker, model_cfg
+    )
+    iterations = (
+        int(np.median(best_iterations))
+        if best_iterations
+        else model_cfg.get("iterations", 1000)
+    )
+
+    model = instantiate_model(
+        model_cfg, use_best_model=False, iterations=max(iterations, 1)
+    )
+    model.fit(X=X_ticker, y=y_ticker)
+    return model, fold_metrics, best_iterations
+
+
+def _train_multiclass_ticker(X_ticker, y_ticker, model_cfg, ticker):
+    model, fold_metrics, best_iterations = _fit_model_with_cv(
+        X_ticker, y_ticker, model_cfg, ticker, "multiclass model"
+    )
+    if model is None:
+        return None, fold_metrics
+
+    logger.info(
+        "Finished %s multiclass model: samples=%d, classes=%d, final_iterations=%d",
+        ticker,
+        len(X_ticker),
+        y_ticker.nunique(),
+        max(
+            int(np.median(best_iterations))
+            if best_iterations
+            else model_cfg.get("iterations", 1000),
+            1,
+        ),
+    )
+    return model, fold_metrics
+
+
+def _train_meta_labeling_ticker(X_ticker, y_ticker, model_cfg, ticker):
+    meta_y = (y_ticker != 0).astype(int)
+    meta_model, meta_metrics, _ = _fit_model_with_cv(
+        X_ticker, meta_y, model_cfg, ticker, "meta model"
+    )
+    if meta_model is None:
+        return None, {"meta": meta_metrics, "side": []}
+
+    side_mask = y_ticker != 0
+    side_X = X_ticker.loc[side_mask]
+    side_y = y_ticker.loc[side_mask]
+    side_model, side_metrics, _ = _fit_model_with_cv(
+        side_X, side_y, model_cfg, ticker, "side model"
+    )
+    if side_model is None:
+        return None, {"meta": meta_metrics, "side": side_metrics}
+
+    logger.info(
+        "Finished %s meta-labeling models: meta_samples=%d, side_samples=%d",
+        ticker,
+        len(X_ticker),
+        len(side_X),
+    )
+    return {"meta_model": meta_model, "side_model": side_model}, {
+        "meta": meta_metrics,
+        "side": side_metrics,
+    }
+
+
 def train():
     """
     Запускаем обучение стратегии и сохраняем отдельную модель для каждого тикера.
@@ -119,6 +204,8 @@ def train():
     os.makedirs(project_path.as_posix() + "/artifacts/metrics", exist_ok=True)
     cfg = load_config(project_path.parent.as_posix() + "/config.yaml")
     model_cfg = cfg.get("model", {})
+    meta_labeling_enabled = model_cfg.get("meta_labeling", {}).get("enabled", False)
+    strategy_mode = "meta_labeling" if meta_labeling_enabled else "multiclass"
 
     # считываем обучающие данные
     X = pd.read_parquet(project_path.as_posix() + "/data/processed/X_train.parquet")
@@ -128,41 +215,33 @@ def train():
     models = {}
     cv_metrics = {}
     tickers = X.index.get_level_values("Ticker").unique()
-    logger.info("Training per-ticker CatBoost models for %d tickers", len(tickers))
+    logger.info(
+        "Training per-ticker CatBoost models for %d tickers, mode=%s",
+        len(tickers),
+        strategy_mode,
+    )
 
     for i, ticker in enumerate(tickers, start=1):
         logger.info("Training ticker %s (%d/%d)", ticker, i, len(tickers))
         X_ticker, y_ticker = _prepare_ticker_data(X, y, ticker)
-        if y_ticker.nunique() < 2:
-            logger.info("Skipping %s: only one target class", ticker)
+
+        if meta_labeling_enabled:
+            model, metrics = _train_meta_labeling_ticker(
+                X_ticker, y_ticker, model_cfg, ticker
+            )
+        else:
+            model, metrics = _train_multiclass_ticker(
+                X_ticker, y_ticker, model_cfg, ticker
+            )
+        if model is None:
             continue
 
-        fold_metrics, best_iterations = _cross_validate_ticker(
-            X_ticker, y_ticker, model_cfg
-        )
-        cv_metrics[ticker] = fold_metrics
-
-        iterations = (
-            int(np.median(best_iterations))
-            if best_iterations
-            else model_cfg.get("iterations", 1000)
-        )
-        model = instantiate_model(
-            model_cfg, use_best_model=False, iterations=max(iterations, 1)
-        )
-        model.fit(X=X_ticker, y=y_ticker)
         models[ticker] = model
-        logger.info(
-            "Finished %s: samples=%d, classes=%d, final_iterations=%d",
-            ticker,
-            len(X_ticker),
-            y_ticker.nunique(),
-            max(iterations, 1),
-        )
+        cv_metrics[ticker] = metrics
 
     # сохраняем обученные модели
     joblib.dump(
-        {"models": models, "cv_metrics": cv_metrics},
+        {"models": models, "cv_metrics": cv_metrics, "mode": strategy_mode},
         project_path.as_posix() + "/models/model_bundle.joblib",
     )
     save_dict(

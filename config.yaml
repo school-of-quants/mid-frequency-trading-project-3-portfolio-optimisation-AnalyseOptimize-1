@@ -9,11 +9,15 @@ fees: 0.001
 data:
   min_ticker_coverage: 0.9
   coverage_field: "Close"
+  force_reload: false
 
 labeling:
   pt_sl: [1, 1]
   vertical_barrier_days: 10
   target_return: 0.05
+  use_volatility_target: true
+  rolling_n: 50
+  scaling_factor: 2.0
 
 model:
   iterations: 1000
@@ -23,7 +27,19 @@ model:
   cv_splits: 5
   embargo_days: 10
   verbose: false
+  meta_labeling:
+    enabled: true
 
 backtest:
   cv_splits: 6
   cv_test_splits: 2
+  benchmark_ticker: "SPY"
+  benchmark_metrics: true
+
+portfolio:
+  min_signal: 0.02
+  top_n: 50
+  max_weight: 0.05
+  risk_scale: true
+  volatility_window: 22
+  rebalance_frequency: "W-FRI"

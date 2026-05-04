@@ -73,6 +73,7 @@ def three_barrier(
     scaling_factor=2.0,
     vertical_barrier_days=10,
     target_return=0.05,
+    use_volatility_target=False,
 ):
     """Labeling based on tripple barrier method and historical volatility
 
@@ -88,10 +89,17 @@ def three_barrier(
     if ptSl is None:
         ptSl = [1, 1]
 
+    if use_volatility_target:
+        trgt = close.pct_change().rolling(rolling_n).std() * scaling_factor
+        trgt = trgt.shift(1).fillna(target_return)
+        trgt = trgt.clip(lower=target_return)
+    else:
+        trgt = target_return
+
     events = pd.DataFrame(
         {
             "t1": close.index + dt.timedelta(days=vertical_barrier_days),
-            "trgt": target_return,
+            "trgt": trgt,
         },
         index=close.index,
     )

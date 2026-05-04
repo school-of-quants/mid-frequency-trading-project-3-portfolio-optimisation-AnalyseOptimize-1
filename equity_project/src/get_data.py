@@ -13,6 +13,22 @@ warnings.filterwarnings("ignore")
 project_path = Path(__file__).parent.parent
 logger = logging.getLogger(__name__)
 
+RAW_TRAIN_PATH = project_path / "data/raw/train_data.parquet"
+RAW_BACKTEST_PATH = project_path / "data/raw/backtest_data.parquet"
+BENCHMARK_PATH = project_path / "data/raw/benchmark_data.parquet"
+PROCESSED_PATHS = {
+    "X_train": project_path / "data/processed/X_train.parquet",
+    "y_train": project_path / "data/processed/y_train.parquet",
+    "X_backtest": project_path / "data/processed/X_backtest.parquet",
+    "y_backtest": project_path / "data/processed/y_backtest.parquet",
+}
+RAW_PATHS = {
+    "train_data": RAW_TRAIN_PATH,
+    "backtest_data": RAW_BACKTEST_PATH,
+    "benchmark_data": BENCHMARK_PATH,
+}
+DATA_CACHE_PATHS = {**RAW_PATHS, **PROCESSED_PATHS}
+
 
 def generate_features(data):
     """Generate some features based on data
@@ -104,6 +120,21 @@ def prepare_ohlc_data(data, min_coverage=0.9, coverage_field="Close"):
     return data, valid_tickers, coverage
 
 
+def data_cache_exists():
+    """Проверяет, что все parquet-файлы для пайплайна уже сохранены."""
+    return all(path.exists() for path in DATA_CACHE_PATHS.values())
+
+
+def load_cached_data():
+    """Загружает сохраненные raw/processed данные без скачивания и feature engineering."""
+    cached_data = {
+        name: pd.read_parquet(path) for name, path in DATA_CACHE_PATHS.items()
+    }
+    for name, data in cached_data.items():
+        logger.info("Loaded cached %s: shape=%s", name, data.shape)
+    return cached_data
+
+
 def get_label(train_data, cfg=None):
     """Создаем разметку для ML модели на основе тройного барьерного метода. Его параметры захардкожены, но при желании вы можете вынести их в конфиг
 
@@ -117,10 +148,38 @@ def get_label(train_data, cfg=None):
     target = train_data.Close.apply(
         three_barrier,
         ptSl=labeling_cfg.get("pt_sl", [1, 1]),
+        rolling_n=labeling_cfg.get("rolling_n", 50),
+        scaling_factor=labeling_cfg.get("scaling_factor", 2.0),
         vertical_barrier_days=labeling_cfg.get("vertical_barrier_days", 10),
         target_return=labeling_cfg.get("target_return", 0.05),
+        use_volatility_target=labeling_cfg.get("use_volatility_target", False),
     )
     return target
+
+
+def get_benchmark_data():
+    """Скачивает benchmark для сравнения стратегии с S&P500 proxy."""
+    cfg = load_config(project_path.parent.as_posix() + "/config.yaml")
+    ticker = cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
+    logger.info("Downloading benchmark data for %s", ticker)
+
+    benchmark = yf.download(
+        ticker,
+        cfg["backtest_start_date"],
+        cfg["backtest_end_date"],
+        group_by="column",
+        auto_adjust=True,
+    )
+    if isinstance(benchmark.columns, pd.MultiIndex):
+        benchmark = benchmark.droplevel(-1, axis=1)
+    if "Adj Close" in benchmark.columns:
+        benchmark.drop(columns="Adj Close", inplace=True)
+
+    benchmark.index = pd.to_datetime(benchmark.index)
+    benchmark.index.name = "Date"
+    benchmark = benchmark.astype(float).ffill().dropna(axis=0, how="any")
+    logger.info("Benchmark data downloaded: shape=%s", benchmark.shape)
+    return benchmark
 
 
 def get_raw_data():
@@ -193,14 +252,21 @@ def get_raw_data():
 def get_data():
     """Скачиваем сырые данные, строим на их основе фичасеты и таргеты для наших тикеров и сохраняем сырые и обработанные данные"""
     cfg = load_config(project_path.parent.as_posix() + "/config.yaml")
+    data_cfg = cfg.get("data", {})
     logger.info("Starting data preparation")
+
+    if not data_cfg.get("force_reload", False) and data_cache_exists():
+        logger.info(
+            "Found cached raw/processed data, skipping download and feature generation"
+        )
+        return load_cached_data()
 
     (
         data,
         first_appearance_dict,
     ) = get_raw_data()
+    benchmark_data = get_benchmark_data()
 
-    data_cfg = cfg.get("data", {})
     data, valid_tickers, coverage = prepare_ohlc_data(
         data,
         min_coverage=data_cfg.get("min_ticker_coverage", 0.9),
@@ -268,6 +334,9 @@ def get_data():
         project_path.as_posix() + "/data/raw/backtest_data.parquet", engine="pyarrow"
     )
     logger.info("Saved backtest raw data: shape=%s", backtest_data.shape)
+
+    benchmark_data.to_parquet(BENCHMARK_PATH, engine="pyarrow")
+    logger.info("Saved benchmark data: shape=%s", benchmark_data.shape)
 
     # разбиваем фичасеты и таргеты ML модели на трейн и бэктест
     X_train = X[

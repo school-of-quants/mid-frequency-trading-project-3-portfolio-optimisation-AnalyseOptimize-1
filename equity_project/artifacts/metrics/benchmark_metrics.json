@@ -1,0 +1,10 @@
+{
+    "benchmark_ticker": "SPY",
+    "benchmark_total_return": 0.5203538498576021,
+    "benchmark_annualized_return": 0.11123076009364707,
+    "benchmark_annualized_volatility": 0.18017792382251546,
+    "benchmark_sharpe": 0.6173384493164384,
+    "benchmark_max_drawdown": -0.24471089848981553,
+    "strategy_total_return": 0.2057433062376242,
+    "excess_total_return": -0.3146105436199779
+}
